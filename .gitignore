@@ -193,3 +193,9 @@ glm/
 _examples_synced/
 .env
 .DS_Store
+
+examples/ECC/checkpoint/
+examples/ECC/tensorboard/
+examples/ECC/wandb/
+
+examples/math_test/
