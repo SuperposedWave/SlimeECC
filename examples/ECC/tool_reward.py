@@ -1,14 +1,67 @@
 import ast
 import logging
+import os
 import re
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
+
+import numpy as np
 
 from examples.ECC import code_ops
 from examples.ECC.ecc_reward import compute_minimum_distance
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Reward normalization: upper bound for min_distance via Singleton bound
+# ---------------------------------------------------------------------------
+
+def _singleton_bound(n: int, k: int) -> int:
+    """Singleton bound: d <= n - k + 1."""
+    return n - k + 1
+
+
+def _normalize_score(min_distance: int, n: int, k: int) -> float:
+    """Map min_distance into [0, 1] using the Singleton bound as ceiling."""
+    upper = _singleton_bound(n, k)
+    if upper <= 0:
+        return 0.0
+    return min(float(min_distance) / upper, 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Historical generator-matrix registry for diversity penalty
+# ---------------------------------------------------------------------------
+
+_HISTORY_MAX_SIZE = int(os.getenv("ECC_HISTORY_MAX_SIZE", "4096"))
+_DIVERSITY_PENALTY = float(os.getenv("ECC_DIVERSITY_PENALTY", "0.1"))
+
+_history_lock = threading.Lock()
+_history: OrderedDict[bytes, int] = OrderedDict()
+
+
+def _matrix_key(G: np.ndarray) -> bytes:
+    """Canonical key: RREF rows flattened to bytes for O(1) lookup."""
+    from examples.ECC.code_ops import rref_gf2
+    rref, _ = rref_gf2(G)
+    return rref.tobytes()
+
+
+def _check_and_register(G: np.ndarray) -> bool:
+    """Return True if this generator matrix is a duplicate; register it either way."""
+    key = _matrix_key(G)
+    with _history_lock:
+        if key in _history:
+            _history[key] += 1
+            _history.move_to_end(key)
+            return True
+        _history[key] = 1
+        if len(_history) > _HISTORY_MAX_SIZE:
+            _history.popitem(last=False)
+        return False
 
 # Fill this with the exact exported names from code_ops.__all__ when ready.
 DEFAULT_ALLOWED_FUNCTIONS = {
@@ -320,6 +373,8 @@ def _format_reward(
     target_distance: int | None = None,
     n: int | None = None,
     k: int | None = None,
+    raw_score: float | None = None,
+    duplicate: bool = False,
     message: str | None = None,
 ) -> dict[str, Any]:
     reward = {
@@ -330,7 +385,10 @@ def _format_reward(
         "target_distance": target_distance,
         "n": n,
         "k": k,
+        "duplicate": duplicate,
     }
+    if raw_score is not None:
+        reward["raw_score"] = float(raw_score)
     if message is not None:
         reward["message"] = message
     return reward
@@ -340,6 +398,8 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
     if isinstance(sample, list):
         return [await custom_rm(args, item, **kwargs) for item in sample]
 
+    diversity_penalty = float(os.getenv("ECC_DIVERSITY_PENALTY", str(_DIVERSITY_PENALTY)))
+
     targets = _resolve_targets(sample)
     try:
         allowed_functions = resolve_allowed_functions(sample)
@@ -347,7 +407,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
         valid, reason = validate_tool_steps(steps, allowed_functions)
         if not valid:
             reward = _format_reward(
-                score=-1.0,
+                score=-0.3,
                 category=reason or "validation_error",
                 parsed_steps=len(steps),
                 message="Function whitelist validation failed.",
@@ -369,7 +429,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
 
         if not execution.get("ok", False):
             reward = _format_reward(
-                score=-0.5,
+                score=-0.2,
                 category=str(execution.get("category", "execution_failed")),
                 parsed_steps=len(steps),
                 message=str(execution.get("message", "Execution failed.")),
@@ -378,19 +438,33 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
             return reward
 
         min_distance = execution.get("min_distance")
+        code_n = execution.get("n")
+        code_k = execution.get("k")
         target_distance = execution.get("target_distance", targets["target_distance"])
-        score = float(min_distance or 0.0)
-        category = "success"
+
+        raw_score = float(min_distance or 0.0)
+        score = _normalize_score(min_distance or 0, code_n or 1, code_k or 0)
+
+        final_code = execution.get("final_code")
+        duplicate = False
+        if final_code is not None and isinstance(final_code, code_ops.LinearCode):
+            duplicate = _check_and_register(final_code.G)
+            if duplicate:
+                score = max(score - diversity_penalty, 0.0)
+
+        category = "success_duplicate" if duplicate else "success"
         rollout_correct = score > 0.0
 
         reward = _format_reward(
             score=score,
+            raw_score=raw_score,
             category=category,
             parsed_steps=len(steps),
             min_distance=min_distance,
             target_distance=target_distance,
-            n=execution.get("n"),
-            k=execution.get("k"),
+            n=code_n,
+            k=code_k,
+            duplicate=duplicate,
         )
         _set_diagnostics(
             sample,
@@ -402,7 +476,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
     except Exception as exc:
         logger.info("ECC tool reward failed: %s", exc)
         reward = _format_reward(
-            score=-1.0,
+            score=-0.3,
             category="parse_error",
             parsed_steps=0,
             message=str(exc),

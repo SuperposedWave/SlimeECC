@@ -56,8 +56,11 @@ fi
 # ECC 任务参数
 # ============================================================================
 
-TARGET_N="${TARGET_N:-30}"
-TARGET_K="${TARGET_K:-5}"
+TARGET_N="${TARGET_N:-18}"
+TARGET_K="${TARGET_K:-7}"
+
+ECC_DIVERSITY_PENALTY="${ECC_DIVERSITY_PENALTY:-0.1}"
+ECC_HISTORY_MAX_SIZE="${ECC_HISTORY_MAX_SIZE:-4096}"
 
 PROMPT_PREFIX="Construct a binary linear code over GF(2) with length n=${TARGET_N} and dimension k=${TARGET_K}. Try to maximize the minimum Hamming distance of the final code."
 
@@ -122,7 +125,7 @@ ROLLOUT_ARGS=(
    --num-steps-per-rollout "${NUM_STEPS_PER_ROLLOUT:-1}"
    --global-batch-size "${GLOBAL_BATCH_SIZE:-128}"
 
-   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-32768}"
+   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-8192}"
    --rollout-temperature "${ROLLOUT_TEMPERATURE:-1.0}"
    --rollout-top-p "${ROLLOUT_TOP_P:-1.0}"
 
@@ -163,7 +166,7 @@ PERF_ARGS=(
 
 GRPO_ARGS=(
    --advantage-estimator grpo
-   --entropy-coef 0.00
+   --entropy-coef "${ENTROPY_COEF:-0.001}"
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
@@ -234,7 +237,9 @@ RUNTIME_ENV_JSON="{
     \"NCCL_NVLS_ENABLE\": \"0\",
     \"TENSORBOARD_DIR\": \"${TENSORBOARD_DIR}\",
     \"ECC_FIXED_PROMPT\": $(printf '%s' "${ECC_FIXED_PROMPT}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
-    \"ECC_FIXED_METADATA\": $(printf '%s' "${ECC_FIXED_METADATA}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+    \"ECC_FIXED_METADATA\": $(printf '%s' "${ECC_FIXED_METADATA}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+    \"ECC_DIVERSITY_PENALTY\": \"${ECC_DIVERSITY_PENALTY}\",
+    \"ECC_HISTORY_MAX_SIZE\": \"${ECC_HISTORY_MAX_SIZE}\"
   }
 }"
 
