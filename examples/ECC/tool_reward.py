@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import logging
 import os
 import re
@@ -32,11 +33,21 @@ def _normalize_score(min_distance: int, n: int, k: int) -> float:
     return min(float(min_distance) / upper, 1.0)
 
 
+def _target_closeness(pred: int | None, target: int | None) -> float:
+    """A smooth [0, 1] closeness score for target-matching objectives."""
+    if pred is None or target is None:
+        return 0.0
+    target = int(target)
+    if target <= 0:
+        return 0.0
+    return max(0.0, 1.0 - abs(int(pred) - target) / target)
+
+
 # ---------------------------------------------------------------------------
-# Historical generator-matrix registry for diversity penalty
+# Historical sample registry for diversity penalty
 # ---------------------------------------------------------------------------
 
-_HISTORY_MAX_SIZE = int(os.getenv("ECC_HISTORY_MAX_SIZE", "4096"))
+_HISTORY_MAX_SIZE = int(os.getenv("ECC_HISTORY_MAX_SIZE", "16384"))
 _DIVERSITY_PENALTY = float(os.getenv("ECC_DIVERSITY_PENALTY", "0.1"))
 
 _history_lock = threading.Lock()
@@ -47,12 +58,22 @@ def _matrix_key(G: np.ndarray) -> bytes:
     """Canonical key: RREF rows flattened to bytes for O(1) lookup."""
     from examples.ECC.code_ops import rref_gf2
     rref, _ = rref_gf2(G)
-    return rref.tobytes()
+    return b"matrix:" + rref.tobytes()
 
 
-def _check_and_register(G: np.ndarray) -> bool:
-    """Return True if this generator matrix is a duplicate; register it either way."""
-    key = _matrix_key(G)
+def _response_key(response: str, steps: list["ParsedStep"] | None = None) -> bytes:
+    """Canonical key for failed samples based on the normalized construction program."""
+    if steps:
+        normalized = "\n".join(step.source.strip() for step in steps if step.source.strip())
+    else:
+        normalized = _get_response_code(response)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    return b"response:" + digest
+
+
+def _check_and_register_key(key: bytes) -> bool:
+    """Return True if this key is a duplicate; register it either way."""
     with _history_lock:
         if key in _history:
             _history[key] += 1
@@ -62,6 +83,14 @@ def _check_and_register(G: np.ndarray) -> bool:
         if len(_history) > _HISTORY_MAX_SIZE:
             _history.popitem(last=False)
         return False
+
+
+def _check_and_register_matrix(G: np.ndarray) -> bool:
+    return _check_and_register_key(_matrix_key(G))
+
+
+def _check_and_register_response(response: str, steps: list["ParsedStep"] | None = None) -> bool:
+    return _check_and_register_key(_response_key(response, steps))
 
 # Fill this with the exact exported names from code_ops.__all__ when ready.
 DEFAULT_ALLOWED_FUNCTIONS = {
@@ -175,6 +204,28 @@ def _parse_call_expr(call: ast.Call) -> tuple[str, list[Any], dict[str, Any]]:
     return func_name, args, kwargs
 
 
+def _collect_code_vars(value: Any) -> set[str]:
+    if isinstance(value, str) and CODE_VAR_RE.match(value):
+        return {value}
+    if isinstance(value, list):
+        refs: set[str] = set()
+        for item in value:
+            refs |= _collect_code_vars(item)
+        return refs
+    if isinstance(value, tuple):
+        refs: set[str] = set()
+        for item in value:
+            refs |= _collect_code_vars(item)
+        return refs
+    if isinstance(value, dict):
+        refs: set[str] = set()
+        for key, val in value.items():
+            refs |= _collect_code_vars(key)
+            refs |= _collect_code_vars(val)
+        return refs
+    return set()
+
+
 def parse_tool_steps(response: str) -> list[ParsedStep]:
     code = _get_response_code(response)
     if not code:
@@ -262,6 +313,48 @@ def resolve_allowed_functions(sample: Sample) -> set[str]:
     raise ValueError("metadata['allowed_functions'] must be a list of function names.")
 
 
+def analyze_tool_step_connectivity(steps: list[ParsedStep]) -> dict[str, Any]:
+    assigned_targets = [step.target for step in steps if step.target is not None]
+    if len(assigned_targets) <= 1:
+        return {
+            "ok": True,
+            "final_target": assigned_targets[-1] if assigned_targets else None,
+            "unused_assigned_vars": [],
+            "final_is_standalone": False,
+        }
+
+    deps_by_target: dict[str, set[str]] = {}
+    for step in steps:
+        if step.target is None:
+            continue
+        refs = set()
+        for arg in step.args:
+            refs |= _collect_code_vars(arg)
+        for value in step.kwargs.values():
+            refs |= _collect_code_vars(value)
+        deps_by_target[step.target] = refs
+
+    final_target = assigned_targets[-1]
+    reachable: set[str] = set()
+    stack = [final_target]
+    while stack:
+        current = stack.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        stack.extend(sorted(deps_by_target.get(current, set()) - reachable))
+
+    unused_assigned_vars = [target for target in assigned_targets[:-1] if target not in reachable]
+    final_is_standalone = len(deps_by_target.get(final_target, set())) == 0
+
+    return {
+        "ok": not final_is_standalone and not unused_assigned_vars,
+        "final_target": final_target,
+        "unused_assigned_vars": unused_assigned_vars,
+        "final_is_standalone": final_is_standalone,
+    }
+
+
 def _resolve_runtime_value(value: Any, env: dict[str, Any]) -> Any:
     if isinstance(value, str) and CODE_VAR_RE.match(value):
         if value not in env:
@@ -320,32 +413,33 @@ def execute_tool_steps(steps: list[ParsedStep], sample: Sample) -> dict[str, Any
                 "message": f"Final object {last_target} is not a LinearCode.",
             }
 
-        if expected_n is not None and final_code.n != int(expected_n):
-            return {
-                "ok": False,
-                "category": "wrong_length",
-                "message": f"Expected n={expected_n}, got n={final_code.n}.",
-                "n": final_code.n,
-                "k": final_code.k,
-            }
-
-        if expected_k is not None and final_code.k != int(expected_k):
-            return {
-                "ok": False,
-                "category": "wrong_dimension",
-                "message": f"Expected k={expected_k}, got k={final_code.k}.",
-                "n": final_code.n,
-                "k": final_code.k,
-            }
-
         min_distance = compute_minimum_distance(final_code.G.tolist())
+        n_match = expected_n is None or final_code.n == int(expected_n)
+        k_match = expected_k is None or final_code.k == int(expected_k)
+
+        if n_match and k_match:
+            category = "success"
+            message = None
+        elif not n_match and not k_match:
+            category = "wrong_length_and_dimension"
+            message = f"Expected (n, k)=({expected_n}, {expected_k}), got ({final_code.n}, {final_code.k})."
+        elif not n_match:
+            category = "wrong_length"
+            message = f"Expected n={expected_n}, got n={final_code.n}."
+        else:
+            category = "wrong_dimension"
+            message = f"Expected k={expected_k}, got k={final_code.k}."
+
         return {
             "ok": True,
-            "category": "success",
+            "category": category,
+            "message": message,
             "final_code": final_code,
             "n": final_code.n,
             "k": final_code.k,
             "min_distance": min_distance,
+            "n_match": n_match,
+            "k_match": k_match,
         }
     except Exception as exc:
         return {
@@ -376,6 +470,11 @@ def _format_reward(
     raw_score: float | None = None,
     duplicate: bool = False,
     message: str | None = None,
+    syntax_score: float | None = None,
+    executable_score: float | None = None,
+    length_score: float | None = None,
+    dimension_score: float | None = None,
+    distance_score: float | None = None,
 ) -> dict[str, Any]:
     reward = {
         "score": float(score),
@@ -391,6 +490,16 @@ def _format_reward(
         reward["raw_score"] = float(raw_score)
     if message is not None:
         reward["message"] = message
+    if syntax_score is not None:
+        reward["syntax_score"] = float(syntax_score)
+    if executable_score is not None:
+        reward["executable_score"] = float(executable_score)
+    if length_score is not None:
+        reward["length_score"] = float(length_score)
+    if dimension_score is not None:
+        reward["dimension_score"] = float(dimension_score)
+    if distance_score is not None:
+        reward["distance_score"] = float(distance_score)
     return reward
 
 
@@ -406,32 +515,74 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
         steps = parse_tool_steps(sample.response)
         valid, reason = validate_tool_steps(steps, allowed_functions)
         if not valid:
+            duplicate = _check_and_register_response(sample.response, steps)
+            score = -0.3 - (diversity_penalty if duplicate else 0.0)
+            category = f"{reason or 'validation_error'}_duplicate" if duplicate else reason or "validation_error"
             reward = _format_reward(
-                score=-0.3,
-                category=reason or "validation_error",
+                score=score,
+                category=category,
                 parsed_steps=len(steps),
+                duplicate=duplicate,
                 message="Function whitelist validation failed.",
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
             return reward
 
+        connectivity = analyze_tool_step_connectivity(steps)
+        if not connectivity["ok"]:
+            if connectivity["final_is_standalone"]:
+                category = "disconnected_final_step"
+                message = "Final assigned code does not depend on any earlier code variable."
+            else:
+                category = "unused_prefix_steps"
+                message = (
+                    "Some earlier assigned code variables are disconnected from the final result: "
+                    + ", ".join(connectivity["unused_assigned_vars"])
+                )
+            duplicate = _check_and_register_response(sample.response, steps)
+            score = -0.25 - (diversity_penalty if duplicate else 0.0)
+            category = f"{category}_duplicate" if duplicate else category
+            reward = _format_reward(
+                score=score,
+                category=category,
+                parsed_steps=len(steps),
+                duplicate=duplicate,
+                message=message,
+            )
+            _set_diagnostics(
+                sample,
+                rollout_correct=False,
+                ecc_tool_reward=reward,
+                ecc_steps=[s.source for s in steps],
+                ecc_unused_assigned_vars=connectivity["unused_assigned_vars"],
+                ecc_final_target=connectivity["final_target"],
+            )
+            return reward
+
         try:
             execution = execute_tool_steps(steps, sample)
         except NotImplementedError as exc:
+            duplicate = _check_and_register_response(sample.response, steps)
+            score = -0.1 - (diversity_penalty if duplicate else 0.0)
             reward = _format_reward(
-                score=-0.1,
-                category="parsed_but_not_executed",
+                score=score,
+                category="parsed_but_not_executed_duplicate" if duplicate else "parsed_but_not_executed",
                 parsed_steps=len(steps),
+                duplicate=duplicate,
                 message=str(exc),
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
             return reward
 
         if not execution.get("ok", False):
+            duplicate = _check_and_register_response(sample.response, steps)
+            base_category = str(execution.get("category", "execution_failed"))
+            score = -0.2 - (diversity_penalty if duplicate else 0.0)
             reward = _format_reward(
-                score=-0.2,
-                category=str(execution.get("category", "execution_failed")),
+                score=score,
+                category=f"{base_category}_duplicate" if duplicate else base_category,
                 parsed_steps=len(steps),
+                duplicate=duplicate,
                 message=str(execution.get("message", "Execution failed.")),
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
@@ -441,18 +592,36 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
         code_n = execution.get("n")
         code_k = execution.get("k")
         target_distance = execution.get("target_distance", targets["target_distance"])
+        execution_category = str(execution.get("category", "success"))
 
         raw_score = float(min_distance or 0.0)
-        score = _normalize_score(min_distance or 0, code_n or 1, code_k or 0)
+        syntax_score = 1.0
+        executable_score = 1.0
+        length_score = _target_closeness(code_n, targets["target_n"])
+        dimension_score = _target_closeness(code_k, targets["target_k"])
+        nk_exact_match = bool(execution.get("n_match", False) and execution.get("k_match", False))
+        distance_score = _normalize_score(min_distance or 0, code_n or 1, code_k or 0) if nk_exact_match else 0.0
+
+        score = (
+            0.25 * syntax_score
+            + 0.25 * executable_score
+            + 0.25 * length_score
+            + 0.25 * dimension_score
+            + 0.5 * distance_score
+        )
+
+        # Ensure any dimension mismatch gets a strictly negative reward.
+        if not bool(execution.get("k_match", False)):
+            score = -max(float(score), 0.05)
 
         final_code = execution.get("final_code")
         duplicate = False
         if final_code is not None and isinstance(final_code, code_ops.LinearCode):
-            duplicate = _check_and_register(final_code.G)
+            duplicate = _check_and_register_matrix(final_code.G)
             if duplicate:
-                score = max(score - diversity_penalty, 0.0)
+                score = max(score - diversity_penalty, 0.0) if score >= 0.0 else score - diversity_penalty
 
-        category = "success_duplicate" if duplicate else "success"
+        category = f"{execution_category}_duplicate" if duplicate else execution_category
         rollout_correct = score > 0.0
 
         reward = _format_reward(
@@ -465,6 +634,12 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
             n=code_n,
             k=code_k,
             duplicate=duplicate,
+            message=execution.get("message"),
+            syntax_score=syntax_score,
+            executable_score=executable_score,
+            length_score=length_score,
+            dimension_score=dimension_score,
+            distance_score=distance_score,
         )
         _set_diagnostics(
             sample,
@@ -475,10 +650,13 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
         return reward
     except Exception as exc:
         logger.info("ECC tool reward failed: %s", exc)
+        duplicate = _check_and_register_response(sample.response)
+        score = -0.3 - (diversity_penalty if duplicate else 0.0)
         reward = _format_reward(
-            score=-0.3,
-            category="parse_error",
+            score=score,
+            category="parse_error_duplicate" if duplicate else "parse_error",
             parsed_steps=0,
+            duplicate=duplicate,
             message=str(exc),
         )
         _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_error=str(exc))

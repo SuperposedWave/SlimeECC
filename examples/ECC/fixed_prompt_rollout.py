@@ -54,13 +54,13 @@ def _load_optional_json_dict(env_name: str) -> dict[str, Any]:
 
 def _prepare_samples(
     sample_groups: list[list[Sample]],
-    fixed_prompt: str | list[dict[str, Any]],
+    rendered_prompt: str,
     fixed_label: str | None,
     fixed_metadata: dict[str, Any],
 ) -> list[list[Sample]]:
     for group in sample_groups:
         for sample in group:
-            sample.prompt = deepcopy(fixed_prompt)
+            sample.prompt = rendered_prompt
             sample.label = fixed_label
             merged_metadata = dict(sample.metadata) if isinstance(sample.metadata, dict) else {}
             merged_metadata.update(fixed_metadata)
@@ -80,6 +80,19 @@ async def _generate_fixed_prompt_rollout_async(
     fixed_prompt = _load_fixed_prompt()
     fixed_label = os.getenv(ENV_FIXED_LABEL)
     fixed_metadata = _load_optional_json_dict(ENV_FIXED_METADATA)
+    if isinstance(fixed_prompt, list):
+        if not args.apply_chat_template:
+            raise ValueError(
+                f"{ENV_FIXED_MESSAGES} requires --apply-chat-template so chat messages can be rendered to text."
+            )
+        rendered_prompt = state.tokenizer.apply_chat_template(
+            fixed_prompt,
+            tokenize=False,
+            add_generation_prompt=True,
+            **(args.apply_chat_template_kwargs or {}),
+        )
+    else:
+        rendered_prompt = fixed_prompt
 
     target_data_size = args.rollout_batch_size
     data = []
@@ -90,7 +103,7 @@ async def _generate_fixed_prompt_rollout_async(
     while len(data) < target_data_size:
         while state.remaining_batch_size < target_data_size:
             sample_groups = data_source.get_samples(args.over_sampling_batch_size)
-            sample_groups = _prepare_samples(sample_groups, fixed_prompt, fixed_label, fixed_metadata)
+            sample_groups = _prepare_samples(sample_groups, rendered_prompt, fixed_label, fixed_metadata)
             state.submit_generate_tasks(sample_groups)
 
         done, state.pendings = await asyncio.wait(state.pendings, return_when=asyncio.FIRST_COMPLETED)

@@ -1,7 +1,9 @@
 import json
 import logging
+from statistics import mean
 from pathlib import Path
 
+from slime.utils.tensorboard_utils import _TensorboardAdapter
 from slime.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,36 @@ def _output_dir(args) -> Path | None:
     return path
 
 
+def _extract_min_distances(samples: list[Sample]) -> list[float]:
+    distances: list[float] = []
+    for sample in samples:
+        reward = sample.reward if isinstance(sample.reward, dict) else {}
+        value = reward.get("min_distance")
+        if value is None:
+            metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+            ecc_reward = metadata.get("ecc_tool_reward")
+            if isinstance(ecc_reward, dict):
+                value = ecc_reward.get("min_distance")
+        if isinstance(value, (int, float)):
+            distances.append(float(value))
+    return distances
+
+
+def _extract_parsed_steps(samples: list[Sample]) -> list[float]:
+    parsed_steps: list[float] = []
+    for sample in samples:
+        reward = sample.reward if isinstance(sample.reward, dict) else {}
+        value = reward.get("parsed_steps")
+        if value is None:
+            metadata = sample.metadata if isinstance(sample.metadata, dict) else {}
+            ecc_reward = metadata.get("ecc_tool_reward")
+            if isinstance(ecc_reward, dict):
+                value = ecc_reward.get("parsed_steps")
+        if isinstance(value, (int, float)):
+            parsed_steps.append(float(value))
+    return parsed_steps
+
+
 def log_and_save_rollout(rollout_id, args, samples, rollout_extra_metrics, rollout_time) -> bool:
     """Save every rollout's samples to a JSON file.
 
@@ -61,5 +93,17 @@ def log_and_save_rollout(rollout_id, args, samples, rollout_extra_metrics, rollo
     out_path = out_dir / f"rollout_{rollout_id}.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     logger.info("Saved %d samples to %s", len(records), out_path)
+
+    if args.use_tensorboard:
+        tb_metrics = {}
+        min_distances = _extract_min_distances(samples)
+        if min_distances:
+            tb_metrics["rollout/ecc_min_distance_max"] = max(min_distances)
+            tb_metrics["rollout/ecc_min_distance_mean"] = mean(min_distances)
+        parsed_steps = _extract_parsed_steps(samples)
+        if parsed_steps:
+            tb_metrics["rollout/ecc_parsed_steps_mean"] = mean(parsed_steps)
+        if tb_metrics:
+            _TensorboardAdapter(args).log(tb_metrics, step=rollout_id)
 
     return False

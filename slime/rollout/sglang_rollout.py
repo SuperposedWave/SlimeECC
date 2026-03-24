@@ -90,6 +90,7 @@ class GenerateState(metaclass=SingletonMeta):
         self.dp_rank = 0
 
         self.reset()
+        self._logged_sampling_params = False
 
     @contextmanager
     def dp_rank_context(self):
@@ -155,6 +156,10 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     if sampling_params["max_new_tokens"] == 0:
         sample.status = Sample.Status.TRUNCATED
         return sample
+
+    if not state._logged_sampling_params:
+        logger.info("Actual rollout sampling params sent to SGLang: %s", sampling_params)
+        state._logged_sampling_params = True
 
     # Prepare payload for sglang server
     payload = {

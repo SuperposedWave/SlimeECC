@@ -18,7 +18,7 @@ export PYTHONBUFFERED=16
 # export WANDB_KEY=$
 
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
-PROJECT_NAME="${PROJECT_NAME:-ecc-tool-grpo}"
+PROJECT_NAME="ecc-tool-grpo"
 EXP_NAME="${PROJECT_NAME}-${TIMESTAMP}"
 
 # ============================================================================
@@ -29,16 +29,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}"
 SLIME_DIR="$(cd -- "${PROJECT_DIR}/../.." &>/dev/null && pwd)"
 
-MODEL_BASE="${MODEL_BASE:-/inspire/hdd/project/qproject-multireasoning/zhouzhixiang-240107010008/Model}"
-MEGATRON_LM_PATH="${MEGATRON_LM_PATH:-/root/Megatron-LM/}"
-MODEL_ARGS_SCRIPT="${MODEL_ARGS_SCRIPT:-${SLIME_DIR}/examples/math_test/scripts/models/qwen3-4B.sh}"
+MODEL_BASE="/inspire/hdd/project/qproject-multireasoning/zhouzhixiang-240107010008/Model"
+MEGATRON_LM_PATH="/root/Megatron-LM/"
+MODEL_ARGS_SCRIPT="/inspire/hdd/project/qproject-multireasoning/zhouzhixiang-240107010008/Project/slime/scripts/models/qwen3-4B.sh"
 
-HF_CHECKPOINT="${HF_CHECKPOINT:-${MODEL_BASE}/Qwen3-4B}"
-TORCH_DIST_CHECKPOINT="${TORCH_DIST_CHECKPOINT:-${MODEL_BASE}/Qwen3-4B_torch_dist}"
-CHECKPOINT="${CHECKPOINT:-${PROJECT_DIR}/checkpoint/${EXP_NAME}}"
-TENSORBOARD_DIR="${TENSORBOARD_DIR:-${PROJECT_DIR}/tensorboard/${EXP_NAME}}"
-WANDB_DIR="${WANDB_DIR:-${PROJECT_DIR}/wandb/${EXP_NAME}}"
-PROMPT_FILE="${PROMPT_FILE:-${PROJECT_DIR}/llm_tool_prompt.txt}"
+HF_CHECKPOINT="${MODEL_BASE}/Qwen3-4B"
+TORCH_DIST_CHECKPOINT="${MODEL_BASE}/Qwen3-4B_torch_dist"
+CHECKPOINT="${PROJECT_DIR}/checkpoint/${EXP_NAME}"
+TENSORBOARD_DIR="${PROJECT_DIR}/tensorboard/${EXP_NAME}"
+WANDB_DIR="${PROJECT_DIR}/wandb/${EXP_NAME}"
+PROMPT_FILE="${PROJECT_DIR}/llm_tool_prompt.txt"
 
 mkdir -p "${CHECKPOINT}" "${TENSORBOARD_DIR}" "${WANDB_DIR}"
 
@@ -56,26 +56,49 @@ fi
 # ECC 任务参数
 # ============================================================================
 
-TARGET_N="${TARGET_N:-18}"
-TARGET_K="${TARGET_K:-7}"
+TARGET_N="18"
+TARGET_K="7"
 
-ECC_DIVERSITY_PENALTY="${ECC_DIVERSITY_PENALTY:-0.1}"
-ECC_HISTORY_MAX_SIZE="${ECC_HISTORY_MAX_SIZE:-4096}"
+ECC_DIVERSITY_PENALTY="0.1"
+ECC_HISTORY_MAX_SIZE="16384"
+ECC_USE_CHAT_TEMPLATE="1"
+
+# Qwen3: passed through to tokenizer.apply_chat_template (rollout + dataset when used).
+APPLY_CHAT_TEMPLATE_KWARGS="{\"enable_thinking\": false}"
 
 PROMPT_PREFIX="Construct a binary linear code over GF(2) with length n=${TARGET_N} and dimension k=${TARGET_K}. Try to maximize the minimum Hamming distance of the final code."
+PROMPT_BODY="${PROMPT_PREFIX}
 
-export ECC_FIXED_PROMPT="${ECC_FIXED_PROMPT:-${PROMPT_PREFIX}
+$(cat "${PROMPT_FILE}")"
 
-$(cat "${PROMPT_FILE}")}"
-export ECC_FIXED_METADATA="${ECC_FIXED_METADATA:-{\"task\":\"ecc\",\"n\":${TARGET_N},\"k\":${TARGET_K}}}"
+if [[ -z "${ECC_FIXED_PROMPT:-}" && -z "${ECC_FIXED_MESSAGES:-}" ]]; then
+    if [[ "${ECC_USE_CHAT_TEMPLATE}" == "1" ]]; then
+        export ECC_FIXED_MESSAGES="$(ECC_PROMPT_CONTENT="${PROMPT_BODY}" python3 -c 'import json, os; print(json.dumps([{"role": "user", "content": os.environ["ECC_PROMPT_CONTENT"]}]))')"
+    else
+        export ECC_FIXED_PROMPT="${PROMPT_BODY}"
+    fi
+fi
+
+export ECC_FIXED_METADATA="{\"task\":\"ecc\",\"n\":${TARGET_N},\"k\":${TARGET_K}}"
 
 # ============================================================================
 # 硬件配置
 # ============================================================================
 
-NUM_GPUS="${NUM_GPUS:-8}"
-TP_SIZE="${TP_SIZE:-2}"
-ROLLOUT_GPUS_PER_ENGINE="${ROLLOUT_GPUS_PER_ENGINE:-2}"
+NUM_GPUS="8"
+TP_SIZE="2"
+ROLLOUT_GPUS_PER_ENGINE="2"
+NUM_ROLLOUT="100"
+ROLLOUT_BATCH_SIZE="1"
+N_SAMPLES_PER_PROMPT="128"
+NUM_STEPS_PER_ROLLOUT="1"
+GLOBAL_BATCH_SIZE="128"
+ROLLOUT_MAX_RESPONSE_LEN="4096"
+ROLLOUT_TEMPERATURE="1.0"
+ROLLOUT_TOP_P="1.0"
+ENTROPY_COEF="0.001"
+LR="1e-6"
+MASTER_ADDR="127.0.0.1"
 
 # ============================================================================
 # NVLink 检测
@@ -104,7 +127,7 @@ CKPT_ARGS=(
    --ref-load "${TORCH_DIST_CHECKPOINT}"
    --load "${CHECKPOINT}"
    --save "${CHECKPOINT}"
-   --save-interval 20
+   --save-interval 10086
 )
 
 # ============================================================================
@@ -119,18 +142,24 @@ ROLLOUT_ARGS=(
    --reward-key score
    --log-reward-category category
 
-   --num-rollout "${NUM_ROLLOUT:-100}"
-   --rollout-batch-size "${ROLLOUT_BATCH_SIZE:-1}"
-   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT:-128}"
-   --num-steps-per-rollout "${NUM_STEPS_PER_ROLLOUT:-1}"
-   --global-batch-size "${GLOBAL_BATCH_SIZE:-128}"
+   --num-rollout "${NUM_ROLLOUT}"
+   --rollout-batch-size "${ROLLOUT_BATCH_SIZE}"
+   --n-samples-per-prompt "${N_SAMPLES_PER_PROMPT}"
+   --num-steps-per-rollout "${NUM_STEPS_PER_ROLLOUT}"
+   --global-batch-size "${GLOBAL_BATCH_SIZE}"
 
-   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN:-8192}"
-   --rollout-temperature "${ROLLOUT_TEMPERATURE:-1.0}"
-   --rollout-top-p "${ROLLOUT_TOP_P:-1.0}"
+   --rollout-max-response-len "${ROLLOUT_MAX_RESPONSE_LEN}"
+   --rollout-temperature "${ROLLOUT_TEMPERATURE}"
+   --rollout-top-p "${ROLLOUT_TOP_P}"
+
+   --apply-chat-template-kwargs "${APPLY_CHAT_TEMPLATE_KWARGS}"
 
    --balance-data
 )
+
+if [[ "${ECC_USE_CHAT_TEMPLATE}" == "1" ]]; then
+   ROLLOUT_ARGS+=(--apply-chat-template)
+fi
 
 # ============================================================================
 # 评估参数
@@ -166,7 +195,8 @@ PERF_ARGS=(
 
 GRPO_ARGS=(
    --advantage-estimator grpo
-   --entropy-coef "${ENTROPY_COEF:-0.001}"
+   --disable-rewards-normalization
+   --entropy-coef "${ENTROPY_COEF}"
    --eps-clip 0.2
    --eps-clip-high 0.28
 )
@@ -177,7 +207,7 @@ GRPO_ARGS=(
 
 OPTIMIZER_ARGS=(
    --optimizer adam
-   --lr "${LR:-1e-6}"
+   --lr "${LR}"
    --lr-decay-style constant
    --weight-decay 0.1
    --adam-beta1 0.9
@@ -227,7 +257,7 @@ MISC_ARGS=(
 # 启动 Ray 集群并提交训练任务
 # ============================================================================
 
-export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+export MASTER_ADDR="${MASTER_ADDR}"
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
 
 RUNTIME_ENV_JSON="{
@@ -237,6 +267,7 @@ RUNTIME_ENV_JSON="{
     \"NCCL_NVLS_ENABLE\": \"0\",
     \"TENSORBOARD_DIR\": \"${TENSORBOARD_DIR}\",
     \"ECC_FIXED_PROMPT\": $(printf '%s' "${ECC_FIXED_PROMPT}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
+    \"ECC_FIXED_MESSAGES\": $(printf '%s' "${ECC_FIXED_MESSAGES}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
     \"ECC_FIXED_METADATA\": $(printf '%s' "${ECC_FIXED_METADATA}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
     \"ECC_DIVERSITY_PENALTY\": \"${ECC_DIVERSITY_PENALTY}\",
     \"ECC_HISTORY_MAX_SIZE\": \"${ECC_HISTORY_MAX_SIZE}\"
@@ -251,14 +282,14 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-nodes 1 \
    --actor-num-gpus-per-node ${NUM_GPUS} \
    --colocate \
-   ${MODEL_ARGS[@]} \
-   ${CKPT_ARGS[@]} \
-   ${ROLLOUT_ARGS[@]} \
-   ${OPTIMIZER_ARGS[@]} \
-   ${GRPO_ARGS[@]} \
-   ${WANDB_ARGS[@]} \
-   ${TB_ARGS[@]} \
-   ${PERF_ARGS[@]} \
-   ${EVAL_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
-   ${MISC_ARGS[@]}
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${WANDB_ARGS[@]}" \
+   "${TB_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${EVAL_ARGS[@]}" \
+   "${SGLANG_ARGS[@]}" \
+   "${MISC_ARGS[@]}"
