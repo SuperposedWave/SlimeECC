@@ -158,6 +158,17 @@ def _set_diagnostics(sample: Sample, **diagnostics: Any) -> None:
     sample.metadata = metadata
 
 
+def _set_feedback_summary(sample: Sample, reward: dict[str, Any]) -> None:
+    _set_diagnostics(
+        sample,
+        ecc_category=reward.get("category"),
+        ecc_message=reward.get("message"),
+        ecc_min_distance=reward.get("min_distance"),
+        ecc_actual_n=reward.get("n"),
+        ecc_actual_k=reward.get("k"),
+    )
+
+
 def _get_response_code(response: str) -> str:
     match = CODE_BLOCK_RE.search(response)
     return match.group(1).strip() if match else response.strip()
@@ -526,6 +537,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
                 message="Function whitelist validation failed.",
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
+            _set_feedback_summary(sample, reward)
             return reward
 
         connectivity = analyze_tool_step_connectivity(steps)
@@ -557,6 +569,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
                 ecc_unused_assigned_vars=connectivity["unused_assigned_vars"],
                 ecc_final_target=connectivity["final_target"],
             )
+            _set_feedback_summary(sample, reward)
             return reward
 
         try:
@@ -572,6 +585,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
                 message=str(exc),
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
+            _set_feedback_summary(sample, reward)
             return reward
 
         if not execution.get("ok", False):
@@ -586,6 +600,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
                 message=str(execution.get("message", "Execution failed.")),
             )
             _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_steps=[s.source for s in steps])
+            _set_feedback_summary(sample, reward)
             return reward
 
         min_distance = execution.get("min_distance")
@@ -647,6 +662,7 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
             ecc_tool_reward=reward,
             ecc_steps=[s.source for s in steps],
         )
+        _set_feedback_summary(sample, reward)
         return reward
     except Exception as exc:
         logger.info("ECC tool reward failed: %s", exc)
@@ -660,4 +676,5 @@ async def custom_rm(args, sample: Sample | list[Sample], **kwargs):
             message=str(exc),
         )
         _set_diagnostics(sample, rollout_correct=False, ecc_tool_reward=reward, ecc_error=str(exc))
+        _set_feedback_summary(sample, reward)
         return reward

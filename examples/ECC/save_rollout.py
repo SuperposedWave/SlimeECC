@@ -87,6 +87,7 @@ def log_and_save_rollout(rollout_id, args, samples, rollout_extra_metrics, rollo
         "rollout_id": rollout_id,
         "rollout_time": rollout_time,
         "num_samples": len(records),
+        "extra_metrics": _reward_to_jsonable(rollout_extra_metrics or {}),
         "samples": records,
     }
 
@@ -103,6 +104,8 @@ def log_and_save_rollout(rollout_id, args, samples, rollout_extra_metrics, rollo
         parsed_steps = _extract_parsed_steps(samples)
         if parsed_steps:
             tb_metrics["rollout/ecc_parsed_steps_mean"] = mean(parsed_steps)
+        if rollout_extra_metrics:
+            tb_metrics.update({f"rollout_extra/{k}": v for k, v in rollout_extra_metrics.items() if isinstance(v, (int, float))})
         if tb_metrics:
             _TensorboardAdapter(args).log(tb_metrics, step=rollout_id)
 

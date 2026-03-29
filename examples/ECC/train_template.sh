@@ -62,6 +62,15 @@ TARGET_K="7"
 ECC_DIVERSITY_PENALTY="0.1"
 ECC_HISTORY_MAX_SIZE="16384"
 ECC_USE_CHAT_TEMPLATE="1"
+ECC_CONTINUATION_ENABLED="1"
+ECC_CONTINUATION_RATIO="0.5"
+ECC_HISTORY_POOL_MAX_SIZE="256"
+ECC_HISTORY_SUCCESS_RATIO="0.4"
+ECC_HISTORY_DIM_ERROR_RATIO="0.4"
+ECC_HISTORY_OTHER_FAIL_RATIO="0.2"
+ECC_CONTINUATION_INCLUDE_PROGRAM="1"
+# Optional. Empty means keep all recorded history seeds.
+ECC_HISTORY_MAX_ROLLOUT_AGE=""
 
 # Qwen3: passed through to tokenizer.apply_chat_template (rollout + dataset when used).
 APPLY_CHAT_TEMPLATE_KWARGS="{\"enable_thinking\": false}"
@@ -136,7 +145,7 @@ CKPT_ARGS=(
 
 ROLLOUT_ARGS=(
    --disable-rollout-global-dataset
-   --rollout-function-path examples.ECC.fixed_prompt_rollout.generate_rollout
+   --rollout-function-path examples.ECC.continuation_rollout.generate_rollout
    --custom-rm-path examples.ECC.tool_reward.custom_rm
    --custom-rollout-log-function-path examples.ECC.save_rollout.log_and_save_rollout
    --reward-key score
@@ -270,7 +279,15 @@ RUNTIME_ENV_JSON="{
     \"ECC_FIXED_MESSAGES\": $(printf '%s' "${ECC_FIXED_MESSAGES}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
     \"ECC_FIXED_METADATA\": $(printf '%s' "${ECC_FIXED_METADATA}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'),
     \"ECC_DIVERSITY_PENALTY\": \"${ECC_DIVERSITY_PENALTY}\",
-    \"ECC_HISTORY_MAX_SIZE\": \"${ECC_HISTORY_MAX_SIZE}\"
+    \"ECC_HISTORY_MAX_SIZE\": \"${ECC_HISTORY_MAX_SIZE}\",
+    \"ECC_CONTINUATION_ENABLED\": \"${ECC_CONTINUATION_ENABLED}\",
+    \"ECC_CONTINUATION_RATIO\": \"${ECC_CONTINUATION_RATIO}\",
+    \"ECC_HISTORY_POOL_MAX_SIZE\": \"${ECC_HISTORY_POOL_MAX_SIZE}\",
+    \"ECC_HISTORY_SUCCESS_RATIO\": \"${ECC_HISTORY_SUCCESS_RATIO}\",
+    \"ECC_HISTORY_DIM_ERROR_RATIO\": \"${ECC_HISTORY_DIM_ERROR_RATIO}\",
+    \"ECC_HISTORY_OTHER_FAIL_RATIO\": \"${ECC_HISTORY_OTHER_FAIL_RATIO}\",
+    \"ECC_CONTINUATION_INCLUDE_PROGRAM\": \"${ECC_CONTINUATION_INCLUDE_PROGRAM}\",
+    \"ECC_HISTORY_MAX_ROLLOUT_AGE\": \"${ECC_HISTORY_MAX_ROLLOUT_AGE}\"
   }
 }"
 

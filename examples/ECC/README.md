@@ -1,4 +1,4 @@
-# ECC Fixed-Prompt Rollout
+# ECC Fixed-Prompt And Continuation Rollout
 
 This example shows how to run slime without a prompt dataset, or with the same
 question repeated for every rollout group.
@@ -35,7 +35,7 @@ export ECC_FIXED_METADATA='{"task":"ecc"}'
 ```bash
 --disable-rollout-global-dataset
 --num-rollout 100
---rollout-function-path examples.ECC.fixed_prompt_rollout.generate_rollout
+--rollout-function-path examples.ECC.continuation_rollout.generate_rollout
 ```
 
 Notes:
@@ -45,6 +45,40 @@ Notes:
 - If your prompt is chat-format messages, keep `--apply-chat-template`.
 - Reward computation is still controlled by your existing `--rm-type` or
   `--custom-rm-path`.
+- By default the continuation rollout mixes cold-start and history-seeded
+  groups. Disable it with `ECC_CONTINUATION_ENABLED=0`.
+
+## ECC continuation rollout
+
+The continuation rollout keeps an in-memory history pool of prior completed
+samples and can reuse them as seeds for future rollout groups.
+
+Useful environment variables:
+
+```bash
+export ECC_CONTINUATION_ENABLED=1
+export ECC_CONTINUATION_RATIO=0.5
+export ECC_HISTORY_POOL_MAX_SIZE=256
+export ECC_HISTORY_SUCCESS_RATIO=0.4
+export ECC_HISTORY_DIM_ERROR_RATIO=0.4
+export ECC_HISTORY_OTHER_FAIL_RATIO=0.2
+export ECC_CONTINUATION_INCLUDE_PROGRAM=1
+export ECC_HISTORY_MAX_ROLLOUT_AGE=20
+```
+
+For continuation groups, the prompt includes:
+
+- the original task description
+- a structured summary of the previous sample's feedback
+- the previous program as a starting point
+
+History seeds are stratified into:
+
+- `success`
+- `dim_error`
+- `other_fail`
+
+and sampled according to the configured ratios.
 
 ## ECC custom reward
 
@@ -173,6 +207,6 @@ python train.py \
   --num-rollout 100 \
   --rollout-batch-size 8 \
   --n-samples-per-prompt 4 \
-  --rollout-function-path examples.ECC.fixed_prompt_rollout.generate_rollout \
+  --rollout-function-path examples.ECC.continuation_rollout.generate_rollout \
   --rm-type deepscaler
 ```
